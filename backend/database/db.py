@@ -3,8 +3,8 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 # Update this with YOUR PostgreSQL password
-# Format: postgresql://username:password@localhost:5432/database_name
-DATABASE_URL = "postgresql://postgres:hello12@localhost:5432/rag_app_db"
+# Format: postgresql+asyncpg://username:password@localhost:5432/database_name
+DATABASE_URL = "postgresql+asyncpg://postgres:hello12@localhost:5432/rag_app_db"
 
 # Create engine
 engine = create_engine(DATABASE_URL)
@@ -19,6 +19,6 @@ Base = declarative_base()
 def get_db():
     db = SessionLocal()
     try:
-        yield db
+        yield db 
     finally:
         db.close()
