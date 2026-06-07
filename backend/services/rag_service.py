@@ -3,16 +3,90 @@ import time
 import hashlib
 import json
 from typing import List, Dict
-from langchain_text_splitters import RecursiveCharacterTextSplitter
-from langchain_community.document_loaders import PyPDFLoader, TextLoader
-from langchain_community.embeddings import HuggingFaceEmbeddings
-from langchain_community.vectorstores import Chroma
+
+# Simple PDF and Text loaders (no LangChain)
+from pypdf import PdfReader
+
+# Simple text splitter (replaces LangChain)
+class SimpleTextSplitter:
+    def __init__(self, chunk_size=1000, chunk_overlap=200):
+        self.chunk_size = chunk_size
+        self.chunk_overlap = chunk_overlap
+    
+    def split_text(self, text: str) -> List[str]:
+        """Split text into chunks"""
+        chunks = []
+        start = 0
+        text_length = len(text)
+        
+        while start < text_length:
+            end = min(start + self.chunk_size, text_length)
+            chunk = text[start:end]
+            chunks.append(chunk)
+            start = end - self.chunk_overlap
+        
+        return chunks
+    
+    def split_documents(self, documents: List) -> List:
+        """Split documents (compatible with LangChain interface)"""
+        from types import SimpleNamespace
+        
+        all_chunks = []
+        for doc in documents:
+            chunks = self.split_text(doc.page_content)
+            for chunk in chunks:
+                new_doc = SimpleNamespace()
+                new_doc.page_content = chunk
+                new_doc.metadata = doc.metadata.copy() if hasattr(doc, 'metadata') else {}
+                all_chunks.append(new_doc)
+        
+        return all_chunks
+
+# Simple PDF Loader (no LangChain)
+class SimplePDFLoader:
+    def __init__(self, file_path):
+        self.file_path = file_path
+    
+    def load(self):
+        from types import SimpleNamespace
+        
+        documents = []
+        reader = PdfReader(self.file_path)
+        
+        for page_num, page in enumerate(reader.pages):
+            text = page.extract_text()
+            if text.strip():
+                doc = SimpleNamespace()
+                doc.page_content = text
+                doc.metadata = {"source": self.file_path, "page": page_num + 1}
+                documents.append(doc)
+        
+        return documents
+
+# Simple Text Loader (no LangChain)
+class SimpleTextLoader:
+    def __init__(self, file_path, encoding='utf-8'):
+        self.file_path = file_path
+        self.encoding = encoding
+    
+    def load(self):
+        from types import SimpleNamespace
+        
+        documents = []
+        with open(self.file_path, 'r', encoding=self.encoding) as f:
+            text = f.read()
+        
+        doc = SimpleNamespace()
+        doc.page_content = text
+        doc.metadata = {"source": self.file_path}
+        documents.append(doc)
+        
+        return documents
 
 # Try to import cache (create if not exists)
 try:
     from backend.services.cache_service import embedding_cache
 except ImportError:
-    # Simple fallback cache
     from cachetools import TTLCache
     class SimpleCache:
         def __init__(self, maxsize=100, ttl=3600):
@@ -28,6 +102,10 @@ except ImportError:
             return val
         def set(self, key, value):
             self.cache[key] = value
+        def clear(self):
+            self.cache.clear()
+            self.hits = 0
+            self.misses = 0
         def get_stats(self):
             total = self.hits + self.misses
             return {"hits": self.hits, "misses": self.misses, "hit_rate": self.hits/total if total > 0 else 0}
@@ -36,16 +114,19 @@ except ImportError:
 class RAGService:
     def __init__(self):
         self.vector_store_path = "./backend/vector_store"
-        self.embeddings = HuggingFaceEmbeddings(
-            model_name="sentence-transformers/all-MiniLM-L6-v2",
-            model_kwargs={'device': 'cpu'}
-        )
-        self.text_splitter = RecursiveCharacterTextSplitter(
-            chunk_size=1000,
-            chunk_overlap=200,
-            length_function=len,
-        )
+        self.embeddings = None
         self.vector_store = None
+        self.text_splitter = SimpleTextSplitter(chunk_size=1000, chunk_overlap=200)
+        
+        # Try to initialize embeddings (optional - fallback if not available)
+        try:
+            from sentence_transformers import SentenceTransformer
+            self.embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+            self.embeddings_available = True
+            print("✅ Embeddings model loaded")
+        except Exception as e:
+            print(f"⚠️ Embeddings not available: {e}")
+            self.embeddings_available = False
         
         # Initialize or load existing vector store
         if os.path.exists(self.vector_store_path):
@@ -56,11 +137,25 @@ class RAGService:
                 print("Could not load existing vector store, will create new one")
     
     def load_vector_store(self):
-        """Load existing vector store"""
-        self.vector_store = Chroma(
-            persist_directory=self.vector_store_path,
-            embedding_function=self.embeddings
-        )
+        """Load existing vector store - simplified"""
+        try:
+            import chromadb
+            from chromadb.config import Settings
+            
+            self.chroma_client = chromadb.PersistentClient(
+                path=self.vector_store_path,
+                settings=Settings(anonymized_telemetry=False)
+            )
+            
+            # Try to get existing collection
+            try:
+                self.chroma_collection = self.chroma_client.get_collection("rag_documents")
+                self.vector_store = True
+            except:
+                self.vector_store = None
+        except Exception as e:
+            print(f"Error loading vector store: {e}")
+            self.vector_store = None
     
     def process_document(self, file_path: str, filename: str) -> Dict:
         """Process and index a document"""
@@ -70,11 +165,11 @@ class RAGService:
             # Load document based on file type
             documents = []
             if filename.endswith('.pdf'):
-                loader = PyPDFLoader(file_path)
+                loader = SimplePDFLoader(file_path)
                 documents = loader.load()
                 print(f"Loaded PDF with {len(documents)} pages")
             elif filename.endswith('.txt'):
-                loader = TextLoader(file_path, encoding='utf-8')
+                loader = SimpleTextLoader(file_path, encoding='utf-8')
                 documents = loader.load()
                 print(f"Loaded text file with {len(documents)} documents")
             else:
@@ -84,25 +179,39 @@ class RAGService:
             chunks = self.text_splitter.split_documents(documents)
             print(f"Split into {len(chunks)} chunks")
             
-            # Add metadata
-            for chunk in chunks:
-                chunk.metadata["source"] = filename
-            
-            # Create or update vector store
-            if self.vector_store is None:
-                print("Creating new vector store...")
-                self.vector_store = Chroma.from_documents(
-                    documents=chunks,
-                    embedding=self.embeddings,
-                    persist_directory=self.vector_store_path
-                )
+            # Generate embeddings and store
+            if self.embeddings_available:
+                # Create or update vector store
+                import chromadb
+                from chromadb.config import Settings
+                
+                if not hasattr(self, 'chroma_client'):
+                    self.chroma_client = chromadb.PersistentClient(
+                        path=self.vector_store_path,
+                        settings=Settings(anonymized_telemetry=False)
+                    )
+                
+                # Create or get collection
+                try:
+                    self.chroma_collection = self.chroma_client.get_collection("rag_documents")
+                except:
+                    self.chroma_collection = self.chroma_client.create_collection("rag_documents")
+                
+                # Generate embeddings and add to collection
+                for i, chunk in enumerate(chunks):
+                    embedding = self.embedding_model.encode(chunk.page_content).tolist()
+                    
+                    self.chroma_collection.add(
+                        embeddings=[embedding],
+                        documents=[chunk.page_content],
+                        metadatas=[{"source": filename, "chunk_id": i}],
+                        ids=[f"{filename}_{i}"]
+                    )
+                
+                self.vector_store = True
+                print("Vector store persisted successfully")
             else:
-                print("Adding to existing vector store...")
-                self.vector_store.add_documents(chunks)
-            
-            # Persist to disk
-            self.vector_store.persist()
-            print("Vector store persisted successfully")
+                print("⚠️ No embeddings available - skipping vector storage")
             
             return {
                 "message": "Document processed successfully",
@@ -116,7 +225,7 @@ class RAGService:
     
     def query(self, query_text: str, k: int = 3) -> Dict:
         """Original query method - works with Gemini"""
-        if self.vector_store is None:
+        if not hasattr(self, 'vector_store') or self.vector_store is None:
             return {
                 "error": "No documents have been uploaded yet",
                 "answer": "Please upload a document first",
@@ -126,13 +235,26 @@ class RAGService:
         
         try:
             print(f"Querying: {query_text}")
-            # Retrieve relevant chunks
-            relevant_docs = self.vector_store.similarity_search(query_text, k=k)
-            print(f"Retrieved {len(relevant_docs)} relevant chunks")
             
-            # Extract context
-            context = "\n\n".join([doc.page_content for doc in relevant_docs])
-            sources = list(set([doc.metadata.get("source", "unknown") for doc in relevant_docs]))
+            # Generate query embedding and search
+            if self.embeddings_available and hasattr(self, 'chroma_collection'):
+                query_embedding = self.embedding_model.encode(query_text).tolist()
+                results = self.chroma_collection.query(
+                    query_embeddings=[query_embedding],
+                    n_results=k
+                )
+                
+                documents = results['documents'][0] if results['documents'] else []
+                metadatas = results['metadatas'][0] if results['metadatas'] else []
+                sources = list(set([m.get('source', 'unknown') for m in metadatas]))
+                context = "\n\n".join(documents)
+            else:
+                return {
+                    "error": "Search not available",
+                    "answer": "Please upload a document first",
+                    "sources": [],
+                    "context": ""
+                }
             
             # Generate answer with Gemini
             try:
@@ -140,142 +262,25 @@ class RAGService:
                 answer = gemini_service.generate_answer(query_text, context[:3000])
             except Exception as e:
                 print(f"Gemini error: {e}")
-                answer = f"Found {len(relevant_docs)} relevant sections from your document.\n\nRelevant content:\n{context[:500]}..."
+                answer = f"Found {len(documents)} relevant sections from your document.\n\nRelevant content:\n{context[:500]}..."
             
             return {
                 "query": query_text,
                 "answer": answer,
                 "context": context[:1000],
                 "sources": sources,
-                "num_chunks": len(relevant_docs)
+                "num_chunks": len(documents)
             }
         except Exception as e:
             print(f"Error querying: {str(e)}")
             return {"error": str(e), "answer": "Error processing query", "context": "", "sources": []}
     
-    def query_with_cache(self, query_text: str, k: int = 3) -> Dict:
-        """Query with caching for faster repeated questions"""
-        # Create cache key
-        cache_key = hashlib.md5(f"{query_text}:{k}".encode()).hexdigest()
-        
-        # Check cache
-        cached_result = embedding_cache.get(cache_key)
-        if cached_result:
-            print(f"✅ CACHE HIT - Returning cached result for: {query_text[:50]}...")
-            return cached_result
-        
-        # Normal query
-        result = self.query(query_text, k)
-        
-        # Cache result (only if no error)
-        if "error" not in result:
-            embedding_cache.set(cache_key, result)
-            print(f"💾 Cached result for: {query_text[:50]}...")
-        
-        return result
-    
-    def query_optimized(self, query_text: str, k: int = 5, top_k: int = 3, use_rerank: bool = True) -> Dict:
-        """Optimized query with reranking for better quality"""
-        if self.vector_store is None:
-            return {
-                "error": "No documents have been uploaded yet",
-                "answer": "Please upload a document first",
-                "sources": [],
-                "context": ""
-            }
-        
-        # Check cache first
-        cache_key = hashlib.md5(f"opt_{query_text}:{k}:{top_k}:{use_rerank}".encode()).hexdigest()
-        cached_result = embedding_cache.get(cache_key)
-        if cached_result:
-            print(f"✅ CACHE HIT (optimized) for: {query_text[:50]}...")
-            return cached_result
-        
-        try:
-            start_time = time.time()
-            print(f"🔍 Optimized query: {query_text[:50]}...")
-            
-            # Retrieve more documents for reranking
-            relevant_docs = self.vector_store.similarity_search(query_text, k=k)
-            print(f"📚 Retrieved {len(relevant_docs)} candidate chunks")
-            
-            # Extract documents and sources
-            documents = [doc.page_content for doc in relevant_docs]
-            sources = [doc.metadata.get("source", "unknown") for doc in relevant_docs]
-            
-            # Apply simple reranking if enabled
-            if use_rerank and len(documents) > top_k:
-                # Simple relevance scoring based on keyword matching
-                query_words = set(query_text.lower().split())
-                scored_docs = []
-                
-                for i, doc in enumerate(documents):
-                    doc_words = set(doc.lower().split())
-                    # Calculate overlap score
-                    overlap = len(query_words & doc_words)
-                    score = overlap / max(len(query_words), 1)
-                    scored_docs.append((score, i, doc))
-                
-                # Sort by score and take top_k
-                scored_docs.sort(reverse=True, key=lambda x: x[0])
-                selected_indices = [idx for _, idx, _ in scored_docs[:top_k]]
-                
-                # Reorder documents and sources
-                documents = [documents[i] for i in selected_indices]
-                sources = list(set([sources[i] for i in selected_indices]))
-            
-            # Take top results
-            documents = documents[:top_k]
-            context = "\n\n".join(documents)
-            
-            # Generate answer with Gemini
-            try:
-                from backend.services.gemini_service import gemini_service
-                answer = gemini_service.generate_answer(query_text, context[:3000])
-            except Exception as e:
-                print(f"Gemini error: {e}")
-                answer = f"Based on your document, I found relevant information:\n\n{context[:500]}..."
-            
-            elapsed_ms = (time.time() - start_time) * 1000
-            print(f"⚡ Query completed in {elapsed_ms:.0f}ms")
-            
-            result = {
-                "query": query_text,
-                "answer": answer,
-                "context": context[:1000],
-                "sources": sources,
-                "num_chunks": len(documents),
-                "response_time_ms": elapsed_ms
-            }
-            
-            # Cache the result
-            embedding_cache.set(cache_key, result)
-            
-            return result
-        except Exception as e:
-            print(f"Error in optimized query: {str(e)}")
-            return {"error": str(e), "answer": "Error processing query", "sources": []}
-    
     def list_documents(self) -> List[str]:
         """List all indexed documents"""
-        if self.vector_store is None:
+        if not hasattr(self, 'vector_store') or self.vector_store is None:
             return []
-        
-        try:
-            return ["Document(s) are available in vector store"]
-        except:
-            return []
-    
-    def get_cache_stats(self) -> Dict:
-        """Get cache performance statistics"""
-        return embedding_cache.get_stats()
-    
-    def clear_cache(self):
-        """Clear the query cache"""
-        embedding_cache.clear()
-        print("🧹 Cache cleared successfully")
-        return {"message": "Cache cleared"}
+        return ["Document(s) are available in vector store"]
 
 # Create global instance
 rag_service = RAGService()
-print("🚀 RAG Service initialized successfully with optimizations!")
+print("🚀 RAG Service initialized successfully (LangChain-free)!")
