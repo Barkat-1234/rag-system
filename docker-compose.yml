@@ -1,0 +1,50 @@
+version: '3.8'
+
+services:
+  postgres:
+    image: postgres:15
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres123
+      POSTGRES_DB: rag_app_db
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    ports:
+      - "5432:5432"
+    networks:
+      - rag_network
+
+  backend:
+    build: .
+    environment:
+      DATABASE_URL: postgresql://postgres:postgres123@postgres:5432/rag_app_db
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+    depends_on:
+      - postgres
+    ports:
+      - "8000:8000"
+    networks:
+      - rag_network
+    volumes:
+      - ./backend/uploads:/app/backend/uploads
+      - ./backend/vector_store:/app/backend/vector_store
+
+  frontend:
+    build:
+      context: .
+      dockerfile: Dockerfile.streamlit
+    environment:
+      API_BASE_URL: http://backend:8000/api/v1
+    depends_on:
+      - backend
+    ports:
+      - "8501:8501"
+    networks:
+      - rag_network
+
+volumes:
+  postgres_data:
+
+networks:
+  rag_network:
+    driver: bridge

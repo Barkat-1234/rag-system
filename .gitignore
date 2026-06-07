@@ -1,0 +1,37 @@
+# Python
+__pycache__/
+*.py[cod]
+*.so
+.Python
+rag_env/
+env/
+venv/
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Vector store
+backend/vector_store/*
+!backend/vector_store/.gitkeep
+
+# Uploads
+backend/uploads/*
+!backend/uploads/.gitkeep
+
+# Environment
+.env
+.env.local
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# Logs
+*.log
+uvicorn.log
+
+# Streamlit
+.streamlit/secrets.tomlrag_env/  __pycache__/  *.pyc  .env  backend/uploads/  backend/vector_store/  chroma_db/ 
